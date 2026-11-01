@@ -3,35 +3,20 @@
   Replaces 02_heirloom_mail.lua (kept as 02_heirloom_mail.lua.bak).
 
   On a NEW real character's first login:
-    1. (REMOVED 2026-10-21, approved by M H: the 20-slot Frostweave Bag (41599) is no longer
-       given - the 4 starter crates below fill the bag slots instead.)
-    2. ~2s later adds every heirloom for the character's CLASS to the bags
+    1. ~2s later adds every heirloom for the character's CLASS to the bags
        (mod-uac: any race/class, so kits are by class, not race).
-    3. Anything that doesn't fit is MAILED ("Starter Heirlooms (overflow)").
-       If the player logs out before step 2 runs, the whole kit is mailed instead.
+    2. Anything that doesn't fit is MAILED ("Starter Heirlooms (overflow)").
+       If the player logs out before step 1 runs, the whole kit is mailed instead.
   Bots are skipped (playerbots API + RNDBOT/PLAYERBOT/AHBOT account names).
   All entries verified Quality=7 in acore_world.item_template.
-
-  2026-10-21 STARTER CRATES (approved by M H): before step 1, every NEW real character gets
-  4x Foror's Crate of Endless Resist Gear Storage (23162, 36-slot general bag):
-    * equipped straight into empty bag slots 19-22, then backpack, then mailed ("Starter Crates");
-    * one-time per character: flag row in acore_characters.familylan_starter_crates (guid PK), written
-      BEFORE the grant, checked synchronously, + player:SaveToDB() after the grant, so a relog / crash /
-      double event can't grant twice. Existing characters are never touched (first-login event only).
-    * 2026-10-21 (later, approved): Frostweave Bag grant removed entirely; crates are the only starter bags.
-  Undo: races-server-stage/GO-LIVE/starter-crates-20261021/UNDO-starter-crates.ps1
+  Existing characters are never touched (first-login event only).
 ]]
 
 local PLAYER_EVENT_ON_LOGOUT      = 4
 local PLAYER_EVENT_ON_FIRST_LOGIN = 30
 local MAIL_STATIONERY_GM = 61
-local INVENTORY_SLOT_BAG_0 = 255
 local GRANT_DELAY_MS = 2000
 local unpack = rawget(_G, "unpack") or table.unpack
-
-local CRATE_ENTRY = 23162          -- Foror's Crate of Endless Resist Gear Storage (36 slots, any items)
-local CRATE_COUNT = 4
-local CRATE_TABLE = "familylan_starter_crates"
 
 local INSIGNIA_ALLIANCE = 44098    -- Inherited Insignia of the Alliance
 local INSIGNIA_HORDE    = 44097    -- Inherited Insignia of the Horde
@@ -176,58 +161,6 @@ local MAIL_BODY = table.concat({
 
 local pending = {}   -- guidLow -> true while the delayed grant hasn't run
 
--- Starter crates (one-time, persistent flag) ------------------------------
-pcall(CharDBExecute, "CREATE TABLE IF NOT EXISTS " .. CRATE_TABLE .. " (" ..
-  "guid INT UNSIGNED NOT NULL PRIMARY KEY, " ..
-  "granted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, " ..
-  "equipped TINYINT UNSIGNED NOT NULL DEFAULT 0, " ..
-  "in_bags TINYINT UNSIGNED NOT NULL DEFAULT 0, " ..
-  "mailed TINYINT UNSIGNED NOT NULL DEFAULT 0)")
-
-local function CratesAlreadyGranted(guid)
-  local ok, q = pcall(CharDBQuery, "SELECT 1 FROM " .. CRATE_TABLE .. " WHERE guid = " .. guid)
-  if not ok then return true end   -- can't verify -> fail safe (never double-grant)
-  return q ~= nil
-end
-
-local function GrantCrates(player)
-  local guid = player:GetGUIDLow()
-  if CratesAlreadyGranted(guid) then
-    print(string.format("[StarterCrates] %s (guid %d) already got crates - skipped", player:GetName(), guid))
-    return
-  end
-  -- flag FIRST so a second event / relog can never grant again
-  CharDBExecute(string.format("INSERT IGNORE INTO %s (guid) VALUES (%d)", CRATE_TABLE, guid))
-  local equipped, inBags, mailed = 0, 0, 0
-  for slot = 19, 22 do
-    if equipped >= CRATE_COUNT then break end
-    if not player:GetItemByPos(INVENTORY_SLOT_BAG_0, slot) then
-      local ok, item = pcall(function() return player:EquipItem(CRATE_ENTRY, slot) end)
-      if ok and IsItem(item) then equipped = equipped + 1 end
-    end
-  end
-  local overflow = {}
-  for _ = 1, CRATE_COUNT - equipped do
-    local ok, item = pcall(function() return player:AddItem(CRATE_ENTRY, 1) end)
-    if ok and IsItem(item) then inBags = inBags + 1 else overflow[#overflow + 1] = CRATE_ENTRY end
-  end
-  if #overflow > 0 then
-    MailItems(guid, "Starter Crates", "Welcome to the family realm!\n\nYour bags were full, so your big crates came by mail.", overflow)
-    mailed = #overflow
-  end
-  CharDBExecute(string.format("UPDATE %s SET equipped = %d, in_bags = %d, mailed = %d WHERE guid = %d",
-    CRATE_TABLE, equipped, inBags, mailed, guid))
-  pcall(function() player:SaveToDB() end)   -- persist crates + cleared first-login flag now
-  print(string.format("[StarterCrates] %s (guid %d): %d equipped, %d in bags, %d mailed",
-    player:GetName(), guid, equipped, inBags, mailed))
-  pcall(function()
-    local msg = (equipped == CRATE_COUNT) and "|cff4CFF00Four huge 36-slot crates|r are in your bag slots!"
-      or "|cff4CFF00Four huge 36-slot crates|r are yours - check your bags!"
-    if mailed > 0 then msg = msg .. " Some didn't fit - check the mailbox near your start area." end
-    player:SendBroadcastMessage(msg)
-  end)
-end
-
 local function GrantKit(player)
   local guid = player:GetGUIDLow()
   if not pending[guid] then return end
@@ -254,8 +187,6 @@ end
 local function OnFirstLogin(event, player)
   if not player or IsBot(player) then return end
   local guid = player:GetGUIDLow()
-  local okC, errC = pcall(GrantCrates, player)
-  if not okC then print("[StarterCrates] grant FAILED: " .. tostring(errC)) end
   if not KITS[player:GetClass()] then
     print(string.format("[Heirlooms] no kit for class %d (%s)", player:GetClass(), player:GetName()))
     return
@@ -282,4 +213,3 @@ end
 RegisterPlayerEvent(PLAYER_EVENT_ON_FIRST_LOGIN, OnFirstLogin)
 RegisterPlayerEvent(PLAYER_EVENT_ON_LOGOUT, OnLogout)
 print("[Heirlooms] first-login heirlooms-to-bags loaded (bots skipped, overflow mailed)")
-print("[StarterCrates] first-login 4x Foror's Crate (23162) loaded (bots skipped, one-time flag, overflow mailed)")
